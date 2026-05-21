@@ -97,11 +97,12 @@ def generate_ass_file(alignment_path: str, output_ass_path: str, caption_style: 
         highlight_tag = "{\\c&H00FFFF&}"
     elif caption_style == "neon_glow":
         bold = "-1"
-        outline = "0.0"
-        shadow = str(5.0 * scale_factor)
-        back_color = "&H00FFFF00&" # Cyan glow
+        outline_color = "&H00FFFF00&"       # Cyan glow outline
+        outline = str(3.0 * scale_factor)
+        shadow = "0.0"                      # No shadow to avoid duplicate caption illusion
         margin_v = str(int(80 * scale_factor))
-        highlight_tag = "{\\c&H00FFFF&\\4c&H00FFFF&}" # Text and shadow to cyan
+        highlight_tag = "{\\c&H00FFFF&\\3c&H00FFFF&}" # Text and outline to yellow
+
         
     # Group words into short phrases (max 24 characters or 0.6 seconds pause)
     phrases = []
