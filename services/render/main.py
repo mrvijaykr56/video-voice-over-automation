@@ -16,6 +16,9 @@ STORAGE_DIR = os.getenv("STORAGE_DIR", os.path.abspath(os.path.join(os.path.dirn
 OUTPUT_DIR = os.path.join(STORAGE_DIR, "output")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+active_processes = {}
+cancelled_jobs = set()
+
 class RenderRequest(BaseModel):
     synced_video_path: str
     audio_path: str
@@ -304,9 +307,13 @@ async def render_video(request: RenderRequest):
     try:
         # Launch FFmpeg to read console progress line-by-line
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
+        if request.job_id:
+            active_processes[request.job_id] = p
         
         last_progress_sent = 70.0
         while True:
+            if request.job_id and request.job_id in cancelled_jobs:
+                raise Exception("Job cancelled by user")
             line = p.stdout.readline()
             if not line:
                 break
@@ -337,6 +344,8 @@ async def render_video(request: RenderRequest):
                     
         p.wait()
         if p.returncode != 0:
+            if request.job_id and request.job_id in cancelled_jobs:
+                raise Exception("Job cancelled by user")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="FFmpeg rendering failed during render."
@@ -347,12 +356,37 @@ async def render_video(request: RenderRequest):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="FFmpeg rendering timed out after 600 seconds."
         )
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Rendering failed: {str(e)}"
+        )
+    finally:
+        if request.job_id:
+            active_processes.pop(request.job_id, None)
+            cancelled_jobs.discard(request.job_id)
         
     return RenderResponse(
         status="success",
         output_video_path=os.path.abspath(output_path),
         details="Rendered H.264/AAC MP4 with word-highlighted ASS subtitles."
     )
+
+@app.post("/cancel/{job_id}")
+async def cancel_job(job_id: str):
+    logger.info(f"Received cancel request for job {job_id}")
+    cancelled_jobs.add(job_id)
+    p = active_processes.get(job_id)
+    if p:
+        logger.info(f"Terminating active subprocess for job {job_id}")
+        p.terminate()
+        try:
+            p.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            p.kill()
+    return {"status": "ok"}
 
 @app.get("/health")
 def health():

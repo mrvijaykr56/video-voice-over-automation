@@ -726,3 +726,60 @@ h1, h2, h3, h4, h5, h6 {
   border-radius: 8px;
   width: 100%;
 }
+
+/* Cancelled Job Styles */
+.status-badge.cancelled {
+  background: rgba(148, 163, 184, 0.1);
+  color: var(--text-secondary);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.cancel-banner {
+  background: rgba(148, 163, 184, 0.08);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 8px;
+  color: var(--text-secondary);
+  padding: 1rem;
+  font-size: 0.85rem;
+  margin-bottom: 1.5rem;
+  display: flex;
+  align-items: start;
+  gap: 0.5rem;
+}
+
+.action-link.cancel-link {
+  color: var(--color-error);
+}
+
+.action-link.cancel-link:hover {
+  color: #f87171;
+  text-decoration: underline;
+}
+
+.cancel-job-btn:hover {
+  background: rgba(239, 68, 68, 0.2) !important;
+  border-color: rgba(239, 68, 68, 0.4) !important;
+  color: #f87171 !important;
+  box-shadow: 0 0 15px rgba(239, 68, 68, 0.15) !important;
+}
+
+.step-item.failed-step .step-indicator {
+  background: var(--color-error);
+  border-color: var(--color-error);
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.4);
+}
+
+.step-item.failed-step .step-title {
+  color: var(--color-error);
+}
+
+.step-item.cancelled-step .step-indicator {
+  background: var(--text-secondary);
+  border-color: var(--text-secondary);
+  box-shadow: 0 0 10px rgba(148, 163, 184, 0.4);
+}
+
+.step-item.cancelled-step .step-title {
+  color: var(--text-secondary);
+}
+

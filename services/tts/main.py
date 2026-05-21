@@ -37,6 +37,8 @@ STORAGE_DIR = os.getenv("STORAGE_DIR", os.path.abspath(os.path.join(os.path.dirn
 AUDIO_DIR = os.path.join(STORAGE_DIR, "audio")
 os.makedirs(AUDIO_DIR, exist_ok=True)
 
+cancelled_jobs = set()
+
 class TTSRequest(BaseModel):
     text: str
     language: str
@@ -100,6 +102,8 @@ async def generate_edge_tts(request: TTSRequest, voice: str, output_path: str, a
     async def stream_and_save():
         with open(output_path, "wb") as f:
             async for chunk in communicate.stream():
+                if request.job_id in cancelled_jobs:
+                    raise Exception("Job cancelled by user")
                 if chunk["type"] == "audio":
                     f.write(chunk["data"])
                 elif chunk["type"] == "WordBoundary":
@@ -130,6 +134,8 @@ async def generate_edge_dynamic(request: TTSRequest, voice: str, output_path: st
     current_time = 0.0
     
     for i in range(0, len(chunks), 2):
+        if request.job_id in cancelled_jobs:
+            raise Exception("Job cancelled by user")
         text_chunk = chunks[i].strip()
         if not text_chunk:
             continue
@@ -151,6 +157,8 @@ async def generate_edge_dynamic(request: TTSRequest, voice: str, output_path: st
         
         chunk_audio = b""
         async for chunk in communicate.stream():
+            if request.job_id in cancelled_jobs:
+                raise Exception("Job cancelled by user")
             if chunk["type"] == "audio":
                 chunk_audio += chunk["data"]
             elif chunk["type"] == "WordBoundary":
@@ -282,6 +290,12 @@ async def generate_audio(request: TTSRequest):
             method, voice = await generate_edge_tts(request, voice, output_path, alignment_path)
             
     except Exception as e:
+        if "cancelled" in str(e).lower():
+            logger.info(f"TTS generation for job {request.job_id} was cancelled. Propagating cancellation.")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Job cancelled by user"
+            )
         logger.error(f"Primary engine {request.tts_engine} failed: {e}. Attempting fallback...")
         try:
             method, voice = await generate_gtts_fallback(request, output_path, alignment_path, lang)
@@ -290,6 +304,8 @@ async def generate_audio(request: TTSRequest):
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"TTS generation failed completely. Primary error: {str(e)}. Fallback error: {str(ge)}"
             )
+    finally:
+        cancelled_jobs.discard(request.job_id)
             
     if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
         raise HTTPException(
@@ -304,6 +320,12 @@ async def generate_audio(request: TTSRequest):
         voice_used=voice,
         method_used=method
     )
+
+@app.post("/cancel/{job_id}")
+async def cancel_job(job_id: str):
+    logger.info(f"Received cancel request for job {job_id}")
+    cancelled_jobs.add(job_id)
+    return {"status": "ok"}
 
 @app.get("/health")
 def health():

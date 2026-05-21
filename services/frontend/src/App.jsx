@@ -20,6 +20,21 @@ import {
 const API_BASE_URL = 'http://127.0.0.1:8000';
 const WS_BASE_URL = 'ws://127.0.0.1:8000';
 
+const getStatusClass = (status) => {
+  switch (status) {
+    case 'COMPLETED':
+      return 'completed';
+    case 'FAILED':
+      return 'failed';
+    case 'CANCELLED':
+      return 'cancelled';
+    case 'PENDING':
+      return 'pending';
+    default:
+      return 'processing';
+  }
+};
+
 function App() {
   // Navigation tab state
   const [activeTab, setActiveTab] = useState('video_sync');
@@ -83,8 +98,8 @@ function App() {
         console.log("WebSocket update:", data);
         setActiveJob(data);
 
-        // If completed or failed, fetch list and refresh
-        if (data.status === 'COMPLETED' || data.status === 'FAILED') {
+        // If completed, failed, or cancelled, fetch list and refresh
+        if (data.status === 'COMPLETED' || data.status === 'FAILED' || data.status === 'CANCELLED') {
           if (data.status === 'COMPLETED') {
             setPreviewUrl(data.final_video_url);
           }
@@ -286,6 +301,29 @@ function App() {
     });
   };
 
+  const handleCancelJob = async (jobId) => {
+    if (!window.confirm("Are you sure you want to cancel this job?")) {
+      return;
+    }
+    try {
+      const response = await fetch(`${API_BASE_URL}/job/${jobId}/cancel`, {
+        method: 'POST',
+      });
+      if (response.ok) {
+        fetchJobs();
+        if (activeJobId === jobId) {
+          setActiveJob(prev => prev ? { ...prev, status: 'CANCELLED', progress: 100.0 } : null);
+        }
+      } else {
+        const errDetail = await response.text();
+        alert(errDetail || "Failed to cancel the job.");
+      }
+    } catch (err) {
+      console.error("Error cancelling job:", err);
+      alert("An error occurred while trying to cancel the job.");
+    }
+  };
+
   const renderProgressStepper = () => {
     if (!activeJob) return null;
 
@@ -305,7 +343,20 @@ function App() {
     if (activeJob.status === 'GENERATING_TTS') currentStepIndex = 1;
     else if (activeJob.status === 'SYNCING') currentStepIndex = 2;
     else if (activeJob.status === 'RENDERING') currentStepIndex = 3;
-    else if (activeJob.status === 'COMPLETED' || activeJob.status === 'FAILED') currentStepIndex = isAudioOnly ? 2 : 4;
+    else if (activeJob.status === 'COMPLETED') currentStepIndex = isAudioOnly ? 2 : 4;
+    else if (activeJob.status === 'FAILED' || activeJob.status === 'CANCELLED') {
+      if (isAudioOnly) {
+        if (activeJob.progress >= 99) currentStepIndex = 2;
+        else if (activeJob.progress >= 10) currentStepIndex = 1;
+        else currentStepIndex = 0;
+      } else {
+        if (activeJob.progress >= 99) currentStepIndex = 4;
+        else if (activeJob.progress >= 70) currentStepIndex = 3;
+        else if (activeJob.progress >= 40) currentStepIndex = 2;
+        else if (activeJob.progress >= 10) currentStepIndex = 1;
+        else currentStepIndex = 0;
+      }
+    }
 
     return (
       <div className="job-monitor-container">
@@ -323,11 +374,23 @@ function App() {
           </div>
         )}
 
+        {activeJob.status === 'CANCELLED' && (
+          <div className="cancel-banner">
+            <AlertTriangle size={18} />
+            <div>
+              <strong>Job Cancelled</strong>
+              <div style={{ marginTop: '0.25rem', fontSize: '0.8rem' }}>The process was cancelled by the user.</div>
+            </div>
+          </div>
+        )}
+
         <div className="stepper">
           {steps.map((step, idx) => {
             let stepStatusClass = '';
-            if (activeJob.status === 'FAILED' && idx >= currentStepIndex) {
-              // Mark skipped/failed steps
+            if ((activeJob.status === 'FAILED' || activeJob.status === 'CANCELLED') && idx >= currentStepIndex) {
+              if (idx === currentStepIndex) {
+                stepStatusClass = activeJob.status === 'FAILED' ? 'failed-step' : 'cancelled-step';
+              }
             } else if (idx < currentStepIndex) {
               stepStatusClass = 'completed';
             } else if (idx === currentStepIndex) {
@@ -339,6 +402,10 @@ function App() {
                 <div className="step-indicator">
                   {idx < currentStepIndex ? (
                     <span style={{ fontSize: '10px', color: '#fff', fontWeight: 'bold' }}>✓</span>
+                  ) : (activeJob.status === 'FAILED' && idx === currentStepIndex) ? (
+                    <span style={{ fontSize: '10px', color: '#fff', fontWeight: 'bold' }}>✗</span>
+                  ) : (activeJob.status === 'CANCELLED' && idx === currentStepIndex) ? (
+                    <span style={{ fontSize: '10px', color: '#fff', fontWeight: 'bold' }}>✕</span>
                   ) : null}
                 </div>
                 <div className="step-title">{step.title}</div>
@@ -351,7 +418,14 @@ function App() {
         <div className="progress-bar-container">
           <div 
             className="progress-bar-fill" 
-            style={{ width: `${activeJob.progress}%`, backgroundColor: activeJob.status === 'FAILED' ? 'var(--color-error)' : undefined }}
+            style={{ 
+              width: `${activeJob.progress}%`, 
+              background: activeJob.status === 'FAILED' 
+                ? 'var(--color-error)' 
+                : activeJob.status === 'CANCELLED'
+                ? 'var(--text-secondary)'
+                : undefined 
+            }}
           />
         </div>
       </div>
@@ -779,6 +853,22 @@ function App() {
               {activeJob && !previewUrl ? (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem', padding: '1.5rem', background: 'rgba(255,255,255,0.01)', borderRadius: '12px', border: '1px dashed var(--border-glass)' }}>
                   {renderProgressStepper()}
+                  {(activeJob.status !== 'COMPLETED' && activeJob.status !== 'FAILED' && activeJob.status !== 'CANCELLED') && (
+                    <button
+                      type="button"
+                      className="action-btn cancel-job-btn"
+                      onClick={() => handleCancelJob(activeJob.job_id)}
+                      style={{ 
+                        marginTop: '0.5rem', 
+                        background: 'rgba(239, 68, 68, 0.1)', 
+                        color: 'var(--color-error)', 
+                        border: '1px solid rgba(239, 68, 68, 0.2)',
+                        boxShadow: 'none'
+                      }}
+                    >
+                      Cancel Job
+                    </button>
+                  )}
                 </div>
               ) : (
                 <div className="preview-container" style={activeJob?.job_type === 'audio_only' || jobsList.find(j => j.id === activeJobId)?.job_type === 'audio_only' ? { aspectRatio: 'auto', padding: '3rem 2rem', background: 'rgba(255,255,255,0.02)' } : undefined}>
@@ -899,7 +989,7 @@ function App() {
                       </span>
                     </td>
                     <td>
-                      <span className={`status-badge ${job.status.toLowerCase()}`}>
+                      <span className={`status-badge ${getStatusClass(job.status)}`}>
                         {job.status === 'GENERATING_TTS' ? 'TTS Gen' : job.status}
                       </span>
                     </td>
@@ -914,9 +1004,19 @@ function App() {
                           </a>
                         </div>
                       ) : (
-                        <span className="action-link" onClick={() => selectJobForPreview(job)}>
-                          Monitor Job
-                        </span>
+                        <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
+                          <span className="action-link" onClick={() => selectJobForPreview(job)}>
+                            Monitor Job
+                          </span>
+                          {(job.status !== 'FAILED' && job.status !== 'CANCELLED') && (
+                            <span 
+                              className="action-link cancel-link" 
+                              onClick={() => handleCancelJob(job.id)}
+                            >
+                              Cancel
+                            </span>
+                          )}
+                        </div>
                       )}
                     </td>
                   </tr>

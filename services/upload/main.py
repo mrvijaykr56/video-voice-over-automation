@@ -133,6 +133,9 @@ def update_job_db(job_id: str, status: str, progress: float, error_message: str 
     try:
         job = db.query(Job).filter(Job.id == job_id).first()
         if job:
+            if job.status in ["CANCELLED", "COMPLETED", "FAILED"]:
+                logger.info(f"update_job_db: Job {job_id} is already in terminal state {job.status}. Ignoring update to {status}.")
+                return
             job.status = status
             job.progress = progress
             if error_message:
@@ -175,8 +178,19 @@ async def run_pipeline_orchestration(
             "final_video_url": video_url
         })
         
+    def is_cancelled() -> bool:
+        db = SessionLocal()
+        try:
+            job = db.query(Job).filter(Job.id == job_id).first()
+            return job is not None and job.status == "CANCELLED"
+        finally:
+            db.close()
+
     try:
         # Step 1: Generate TTS Audio
+        if is_cancelled():
+            logger.info(f"Job {job_id} was cancelled. Exiting orchestration.")
+            return
         await update_status("GENERATING_TTS", 10.0)
         logger.info(f"Job {job_id}: Requesting TTS audio...")
         
@@ -186,6 +200,9 @@ async def run_pipeline_orchestration(
         # Step 0: Optional AI Script Polishing via Gemini LLM
         gemini_api_key = os.getenv("GEMINI_API_KEY")
         if polish_script and gemini_api_key:
+            if is_cancelled():
+                logger.info(f"Job {job_id} was cancelled. Exiting orchestration.")
+                return
             await update_status("POLISHING_SCRIPT", 5.0)
             logger.info(f"Job {job_id}: GEMINI_API_KEY found. Polishing script using LLM...")
             try:
@@ -221,6 +238,9 @@ async def run_pipeline_orchestration(
         
         import anyio
         
+        if is_cancelled():
+            logger.info(f"Job {job_id} was cancelled. Exiting orchestration.")
+            return
         tts_resp = await anyio.to_thread.run_sync(lambda: requests.post(TTS_URL, json=tts_req, timeout=600))
         if tts_resp.status_code != 200:
             raise Exception(f"TTS service failed: {tts_resp.text}")
@@ -245,6 +265,9 @@ async def run_pipeline_orchestration(
                 )
         
         # Step 2: Synchronize Audio with Video (Lip-Sync or Scene Alignment)
+        if is_cancelled():
+            logger.info(f"Job {job_id} was cancelled. Exiting orchestration.")
+            return
         await update_status("SYNCING", 40.0)
         logger.info(f"Job {job_id}: Syncing video with audio ({sync_mode})...")
         
@@ -263,6 +286,9 @@ async def run_pipeline_orchestration(
         logger.info(f"Job {job_id}: Generated synced video at {synced_video_path}")
         
         # Step 3: Final Rendering & Encoding
+        if is_cancelled():
+            logger.info(f"Job {job_id} was cancelled. Exiting orchestration.")
+            return
         await update_status("RENDERING", 70.0)
         logger.info(f"Job {job_id}: Rendering final output...")
         
@@ -297,6 +323,15 @@ async def run_pipeline_orchestration(
         
     except Exception as e:
         logger.error(f"Job {job_id} Pipeline Failure: {e}")
+        # Check if cancelled
+        db = SessionLocal()
+        try:
+            job = db.query(Job).filter(Job.id == job_id).first()
+            if job and job.status == "CANCELLED":
+                logger.info(f"Job {job_id} was cancelled. Skipping failure status update.")
+                return
+        finally:
+            db.close()
         await update_status("FAILED", 100.0, err=str(e))
 
 async def run_audio_only_orchestration(
@@ -320,8 +355,19 @@ async def run_audio_only_orchestration(
             "final_video_url": audio_url
         })
         
+    def is_cancelled() -> bool:
+        db = SessionLocal()
+        try:
+            job = db.query(Job).filter(Job.id == job_id).first()
+            return job is not None and job.status == "CANCELLED"
+        finally:
+            db.close()
+
     try:
         # Step 1: Generate TTS Audio
+        if is_cancelled():
+            logger.info(f"Job {job_id} was cancelled. Exiting orchestration.")
+            return
         await update_status("GENERATING_TTS", 20.0)
         logger.info(f"Job {job_id}: Requesting TTS audio...")
         
@@ -338,6 +384,9 @@ async def run_audio_only_orchestration(
         }
         
         import anyio
+        if is_cancelled():
+            logger.info(f"Job {job_id} was cancelled. Exiting orchestration.")
+            return
         tts_resp = await anyio.to_thread.run_sync(lambda: requests.post(TTS_URL, json=tts_req, timeout=600))
         if tts_resp.status_code != 200:
             raise Exception(f"TTS service failed: {tts_resp.text}")
@@ -351,10 +400,22 @@ async def run_audio_only_orchestration(
         final_audio_url = f"http://127.0.0.1:8000/static/audio/{final_filename}"
         
         # Done!
+        if is_cancelled():
+            logger.info(f"Job {job_id} was cancelled. Exiting orchestration.")
+            return
         await update_status("COMPLETED", 100.0, audio_url=final_audio_url)
         logger.info(f"Job {job_id}: Audio pipeline finished successfully!")
     except Exception as e:
         logger.error(f"Job {job_id} Audio Pipeline Failure: {e}")
+        # Check if cancelled
+        db = SessionLocal()
+        try:
+            job = db.query(Job).filter(Job.id == job_id).first()
+            if job and job.status == "CANCELLED":
+                logger.info(f"Job {job_id} was cancelled. Skipping failure status update.")
+                return
+        finally:
+            db.close()
         await update_status("FAILED", 100.0, err=str(e))
 
 def cleanup_temporary_files():
@@ -562,6 +623,50 @@ def get_job(job_id: str):
     finally:
         db.close()
 
+CANCEL_URLS = [
+    "http://127.0.0.1:8001/cancel",
+    "http://127.0.0.1:8002/cancel",
+    "http://127.0.0.1:8003/cancel"
+]
+
+@app.post("/job/{job_id}/cancel")
+async def cancel_coordinator_job(job_id: str):
+    db = SessionLocal()
+    try:
+        job = db.query(Job).filter(Job.id == job_id).first()
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+            
+        if job.status in ["COMPLETED", "FAILED", "CANCELLED"]:
+            return {"status": "ignored", "message": f"Job is already in {job.status} state"}
+            
+        job.status = "CANCELLED"
+        job.progress = 100.0
+        db.commit()
+        
+        # Broadcast immediately to websockets
+        await manager.broadcast_to_job(job_id, {
+            "job_id": job_id,
+            "status": "CANCELLED",
+            "progress": 100.0,
+            "error_message": "Cancelled by user"
+        })
+    finally:
+        db.close()
+        
+    # Propagate cancel to other services
+    import anyio
+    import requests
+    def send_cancels():
+        for url in CANCEL_URLS:
+            try:
+                requests.post(f"{url}/{job_id}", json={}, timeout=2.0)
+            except Exception as e:
+                logger.warning(f"Failed to send cancel to {url}: {e}")
+                
+    await anyio.to_thread.run_sync(send_cancels)
+    return {"status": "cancelled", "job_id": job_id}
+
 @app.websocket("/ws/job/{job_id}")
 async def websocket_endpoint(websocket: WebSocket, job_id: str):
     await manager.connect(job_id, websocket)
@@ -614,6 +719,8 @@ async def update_job_progress(job_id: str, request: ProgressUpdate):
     try:
         job = db.query(Job).filter(Job.id == job_id).first()
         if job:
+            if job.status in ["CANCELLED", "COMPLETED", "FAILED"]:
+                return {"status": "ignored", "message": f"Job is in terminal state {job.status}"}
             job.status = request.status
             job.progress = request.progress
             if request.error_message is not None:

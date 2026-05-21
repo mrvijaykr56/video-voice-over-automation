@@ -14,6 +14,9 @@ STORAGE_DIR = os.getenv("STORAGE_DIR", os.path.abspath(os.path.join(os.path.dirn
 SYNCED_DIR = os.path.join(STORAGE_DIR, "synced_videos")
 os.makedirs(SYNCED_DIR, exist_ok=True)
 
+active_processes = {}
+cancelled_jobs = set()
+
 class SyncRequest(BaseModel):
     video_path: str
     audio_path: str
@@ -75,9 +78,13 @@ def run_scene_alignment(video_path: str, audio_path: str, output_path: str, job_
     try:
         # Launch FFmpeg as a subprocess to parse console output in real-time
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
+        if job_id:
+            active_processes[job_id] = p
         
         last_progress_sent = 40.0
         while True:
+            if job_id and job_id in cancelled_jobs:
+                raise Exception("Job cancelled by user")
             line = p.stdout.readline()
             if not line:
                 break
@@ -109,12 +116,17 @@ def run_scene_alignment(video_path: str, audio_path: str, output_path: str, job_
                     
         p.wait()
         if p.returncode != 0:
+            if job_id and job_id in cancelled_jobs:
+                raise Exception("Job cancelled by user")
             raise Exception("FFmpeg processing failure.")
             
     except subprocess.TimeoutExpired:
         raise Exception("FFmpeg scene alignment timed out.")
     except Exception as e:
         raise Exception(f"FFmpeg error: {str(e)}")
+    finally:
+        if job_id:
+            active_processes.pop(job_id, None)
         
     return "scene_speed_matching"
 
@@ -146,6 +158,9 @@ def run_wav2lip_stub(video_path: str, audio_path: str, output_path: str, job_id:
         method = run_scene_alignment(video_path, audio_path, output_path, job_id)
         return method, "Wav2Lip checkpoint found, but running CPU fallback sync to ensure performance stability."
     except Exception as e:
+        if "cancelled" in str(e).lower():
+            logger.info(f"Lipsync sync for job {job_id} was cancelled. Propagating cancellation.")
+            raise e
         logger.error(f"Wav2Lip failed: {e}. Falling back to Scene-Based Alignment.")
         method = run_scene_alignment(video_path, audio_path, output_path, job_id)
         return method, f"Wav2Lip failed ({str(e)}). Executed Scene-Based timing alignment fallback."
@@ -171,6 +186,8 @@ async def sync_audio_video(request: SyncRequest):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Synchronization failed: {str(e)}"
         )
+    finally:
+        cancelled_jobs.discard(request.job_id)
         
     return SyncResponse(
         status="success",
@@ -178,6 +195,20 @@ async def sync_audio_video(request: SyncRequest):
         method_used=method,
         details=details
     )
+
+@app.post("/cancel/{job_id}")
+async def cancel_job(job_id: str):
+    logger.info(f"Received cancel request for job {job_id}")
+    cancelled_jobs.add(job_id)
+    p = active_processes.get(job_id)
+    if p:
+        logger.info(f"Terminating active subprocess for job {job_id}")
+        p.terminate()
+        try:
+            p.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            p.kill()
+    return {"status": "ok"}
 
 @app.get("/health")
 def health():
