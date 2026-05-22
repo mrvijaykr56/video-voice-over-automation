@@ -38,7 +38,12 @@ const getStatusClass = (status) => {
 const formatJobDate = (dateStr) => {
   if (!dateStr) return '';
   let isoStr = dateStr;
-  if (!isoStr.endsWith('Z') && !isoStr.includes('+') && !isoStr.includes('-')) {
+  
+  // Check for timezone indicator (+ or Z, or a - offset in the time part)
+  const timePart = isoStr.includes('T') ? isoStr.split('T')[1] : (isoStr.includes(' ') ? isoStr.split(' ')[1] : '');
+  const hasTimezone = isoStr.endsWith('Z') || isoStr.includes('+') || (timePart && timePart.includes('-'));
+  
+  if (!hasTimezone) {
     if (isoStr.includes(' ')) {
       isoStr = isoStr.replace(' ', 'T');
     }
