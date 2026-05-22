@@ -59,8 +59,13 @@ class Job(Base):
     font_size = Column(Float, default=24.0)
     job_type = Column(String, default="video_sync")
     bgm_volume = Column(Float, default=0.1)
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+    voice_speed = Column(Float, default=1.0)
+    azure_speech_key = Column(String, nullable=True)
+    azure_speech_region = Column(String, nullable=True)
+    voice_name = Column(String, nullable=True)
+    voice_style = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc), onupdate=lambda: datetime.datetime.now(datetime.timezone.utc))
     error_message = Column(String, nullable=True)
     final_video_url = Column(String, nullable=True)
 
@@ -88,6 +93,36 @@ except Exception:
 try:
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE jobs ADD COLUMN bgm_volume REAL DEFAULT 0.1"))
+except Exception:
+    pass
+
+try:
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE jobs ADD COLUMN voice_speed REAL DEFAULT 1.0"))
+except Exception:
+    pass
+
+try:
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE jobs ADD COLUMN azure_speech_key TEXT"))
+except Exception:
+    pass
+
+try:
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE jobs ADD COLUMN azure_speech_region TEXT"))
+except Exception:
+    pass
+
+try:
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE jobs ADD COLUMN voice_name TEXT"))
+except Exception:
+    pass
+
+try:
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE jobs ADD COLUMN voice_style TEXT"))
 except Exception:
     pass
 
@@ -163,7 +198,12 @@ async def run_pipeline_orchestration(
     bgm_volume: float = 0.1,
     tts_engine: str = "edge-tts",
     elevenlabs_key: str = "",
-    polish_script: bool = True
+    polish_script: bool = True,
+    voice_speed: float = 1.0,
+    azure_speech_key: str = "",
+    azure_speech_region: str = "",
+    voice_name: str = "",
+    voice_style: str = ""
 ):
     logger.info(f"Starting orchestration pipeline for job {job_id}")
     
@@ -233,7 +273,12 @@ async def run_pipeline_orchestration(
             "voice_gender": voice_gender,
             "job_id": job_id,
             "tts_engine": tts_engine,
-            "elevenlabs_key": elevenlabs_key
+            "elevenlabs_key": elevenlabs_key,
+            "voice_speed": voice_speed,
+            "azure_speech_key": azure_speech_key,
+            "azure_speech_region": azure_speech_region,
+            "voice_name": voice_name,
+            "voice_style": voice_style
         }
         
         import anyio
@@ -241,7 +286,7 @@ async def run_pipeline_orchestration(
         if is_cancelled():
             logger.info(f"Job {job_id} was cancelled. Exiting orchestration.")
             return
-        tts_resp = await anyio.to_thread.run_sync(lambda: requests.post(TTS_URL, json=tts_req, timeout=600))
+        tts_resp = await anyio.to_thread.run_sync(lambda: requests.post(TTS_URL, json=tts_req, timeout=1200))
         if tts_resp.status_code != 200:
             raise Exception(f"TTS service failed: {tts_resp.text}")
             
@@ -278,7 +323,7 @@ async def run_pipeline_orchestration(
             "sync_mode": sync_mode
         }
         
-        sync_resp = await anyio.to_thread.run_sync(lambda: requests.post(SYNC_URL, json=sync_req, timeout=600))
+        sync_resp = await anyio.to_thread.run_sync(lambda: requests.post(SYNC_URL, json=sync_req, timeout=3600))
         if sync_resp.status_code != 200:
             raise Exception(f"Sync service failed: {sync_resp.text}")
             
@@ -305,7 +350,7 @@ async def run_pipeline_orchestration(
             "bgm_volume": bgm_volume
         }
         
-        render_resp = await anyio.to_thread.run_sync(lambda: requests.post(RENDER_URL, json=render_req, timeout=600))
+        render_resp = await anyio.to_thread.run_sync(lambda: requests.post(RENDER_URL, json=render_req, timeout=3600))
         if render_resp.status_code != 200:
             raise Exception(f"Render service failed: {render_resp.text}")
             
@@ -340,7 +385,12 @@ async def run_audio_only_orchestration(
     language: str,
     voice_gender: str,
     tts_engine: str = "edge-tts",
-    elevenlabs_key: str = ""
+    elevenlabs_key: str = "",
+    voice_speed: float = 1.0,
+    azure_speech_key: str = "",
+    azure_speech_region: str = "",
+    voice_name: str = "",
+    voice_style: str = ""
 ):
     logger.info(f"Starting audio-only orchestration pipeline for job {job_id}")
     
@@ -380,14 +430,19 @@ async def run_audio_only_orchestration(
             "voice_gender": voice_gender,
             "job_id": job_id,
             "tts_engine": tts_engine,
-            "elevenlabs_key": elevenlabs_key
+            "elevenlabs_key": elevenlabs_key,
+            "voice_speed": voice_speed,
+            "azure_speech_key": azure_speech_key,
+            "azure_speech_region": azure_speech_region,
+            "voice_name": voice_name,
+            "voice_style": voice_style
         }
         
         import anyio
         if is_cancelled():
             logger.info(f"Job {job_id} was cancelled. Exiting orchestration.")
             return
-        tts_resp = await anyio.to_thread.run_sync(lambda: requests.post(TTS_URL, json=tts_req, timeout=600))
+        tts_resp = await anyio.to_thread.run_sync(lambda: requests.post(TTS_URL, json=tts_req, timeout=1200))
         if tts_resp.status_code != 200:
             raise Exception(f"TTS service failed: {tts_resp.text}")
             
@@ -420,20 +475,23 @@ async def run_audio_only_orchestration(
 
 def cleanup_temporary_files():
     temp_dirs = [
-        os.path.join(STORAGE_DIR, "raw_videos"),
-        os.path.join(STORAGE_DIR, "scripts"),
-        os.path.join(STORAGE_DIR, "audio"),
-        os.path.join(STORAGE_DIR, "synced_videos"),
-        os.path.join(STORAGE_DIR, "bgm")
+        ("raw_videos", os.path.join(STORAGE_DIR, "raw_videos")),
+        ("scripts", os.path.join(STORAGE_DIR, "scripts")),
+        ("audio", os.path.join(STORAGE_DIR, "audio")),
+        ("synced_videos", os.path.join(STORAGE_DIR, "synced_videos")),
+        ("bgm", os.path.join(STORAGE_DIR, "bgm")),
+        ("output", os.path.join(STORAGE_DIR, "output"))
     ]
-    logger.info("Auto-cleanup triggered. Cleaning old temporary files (excluding output folder)...")
+    logger.info("Auto-cleanup triggered. Cleaning old temporary files...")
     cutoff_time = time.time() - (2 * 3600)  # Only delete files older than 2 hours
-    for directory in temp_dirs:
+    for name, directory in temp_dirs:
         if os.path.exists(directory):
             try:
                 for filename in os.listdir(directory):
                     file_path = os.path.join(directory, filename)
                     if os.path.isfile(file_path):
+                        if name == "output" and not filename.endswith(".ass"):
+                            continue
                         if os.path.getmtime(file_path) < cutoff_time:
                             try:
                                 os.remove(file_path)
@@ -474,7 +532,12 @@ async def upload_job(
     bgm_volume: float = Form(0.1),
     tts_engine: str = Form("edge-tts"),
     elevenlabs_key: str = Form(""),
-    polish_script: bool = Form(True)
+    polish_script: bool = Form(True),
+    voice_speed: float = Form(1.0),
+    azure_speech_key: str = Form(""),
+    azure_speech_region: str = Form(""),
+    voice_name: str = Form(""),
+    voice_style: str = Form("")
 ):
     cleanup_temporary_files()
     job_id = str(uuid.uuid4())
@@ -504,7 +567,12 @@ async def upload_job(
             watermark_text=watermark_text,
             caption_style=caption_style,
             font_size=font_size,
-            bgm_volume=bgm_volume
+            bgm_volume=bgm_volume,
+            voice_speed=voice_speed,
+            azure_speech_key=azure_speech_key,
+            azure_speech_region=azure_speech_region,
+            voice_name=voice_name,
+            voice_style=voice_style
         )
         db.add(new_job)
         db.commit()
@@ -540,7 +608,12 @@ async def upload_job(
         bgm_volume,
         tts_engine,
         elevenlabs_key,
-        polish_script
+        polish_script,
+        voice_speed,
+        azure_speech_key,
+        azure_speech_region,
+        voice_name,
+        voice_style
     )
     
     return {"status": "queued", "job_id": job_id}
@@ -553,7 +626,12 @@ async def upload_audio_job(
     language: str = Form("en"),
     voice_gender: str = Form("male"),
     tts_engine: str = Form("edge-tts"),
-    elevenlabs_key: str = Form("")
+    elevenlabs_key: str = Form(""),
+    voice_speed: float = Form(1.0),
+    azure_speech_key: str = Form(""),
+    azure_speech_region: str = Form(""),
+    voice_name: str = Form(""),
+    voice_style: str = Form("")
 ):
     cleanup_temporary_files()
     if not script and not script_text:
@@ -583,7 +661,12 @@ async def upload_audio_job(
             language=language,
             voice_gender=voice_gender,
             job_type="audio_only",
-            sync_mode="none"
+            sync_mode="none",
+            voice_speed=voice_speed,
+            azure_speech_key=azure_speech_key,
+            azure_speech_region=azure_speech_region,
+            voice_name=voice_name,
+            voice_style=voice_style
         )
         db.add(new_job)
         db.commit()
@@ -598,7 +681,12 @@ async def upload_audio_job(
         language,
         voice_gender,
         tts_engine,
-        elevenlabs_key
+        elevenlabs_key,
+        voice_speed,
+        azure_speech_key,
+        azure_speech_region,
+        voice_name,
+        voice_style
     )
     
     return {"status": "queued", "job_id": job_id}
@@ -611,6 +699,92 @@ def get_jobs():
         return jobs
     finally:
         db.close()
+
+@app.post("/cleanup_temp_files")
+async def cleanup_temp_files():
+    db = SessionLocal()
+    try:
+        # Get active job IDs (status not in COMPLETED, FAILED, CANCELLED)
+        active_jobs = db.query(Job).filter(Job.status.notin_(["COMPLETED", "FAILED", "CANCELLED"])).all()
+        active_ids = {j.id for j in active_jobs}
+        
+        # Get completed audio-only job IDs
+        completed_audio_jobs = db.query(Job).filter(Job.job_type == "audio_only", Job.status == "COMPLETED").all()
+        completed_audio_ids = {j.id for j in completed_audio_jobs}
+    except Exception as e:
+        logger.error(f"Failed to query jobs for cleanup: {e}")
+        raise HTTPException(status_code=500, detail=f"Database query failed: {str(e)}")
+    finally:
+        db.close()
+        
+    temp_dirs = {
+        "raw_videos": os.path.join(STORAGE_DIR, "raw_videos"),
+        "scripts": os.path.join(STORAGE_DIR, "scripts"),
+        "audio": os.path.join(STORAGE_DIR, "audio"),
+        "synced_videos": os.path.join(STORAGE_DIR, "synced_videos"),
+        "bgm": os.path.join(STORAGE_DIR, "bgm"),
+        "output": os.path.join(STORAGE_DIR, "output")
+    }
+    
+    deleted_count = 0
+    freed_bytes = 0
+    deleted_files = []
+    
+    for dir_name, directory in temp_dirs.items():
+        if not os.path.exists(directory):
+            continue
+        try:
+            for filename in os.listdir(directory):
+                file_path = os.path.join(directory, filename)
+                if not os.path.isfile(file_path):
+                    continue
+                
+                # Check if it belongs to an active job
+                is_active = any(active_id in filename for active_id in active_ids)
+                if is_active:
+                    continue
+                
+                # Special check for audio directory: keep completed audio_only jobs
+                if dir_name == "audio":
+                    is_completed_audio = any(comp_id in filename for comp_id in completed_audio_ids)
+                    if is_completed_audio:
+                        continue
+                
+                # Special check for output directory: only clean up .ass files, never final video outputs
+                if dir_name == "output":
+                    if not filename.endswith(".ass"):
+                        continue
+                
+                # Delete the file
+                try:
+                    file_size = os.path.getsize(file_path)
+                    os.remove(file_path)
+                    deleted_count += 1
+                    freed_bytes += file_size
+                    deleted_files.append(filename)
+                    logger.info(f"Manual cleanup deleted file: {file_path}")
+                except Exception as e:
+                    logger.warning(f"Could not delete file {file_path} during manual cleanup: {e}")
+        except Exception as e:
+            logger.error(f"Error checking directory {directory} for cleanup: {e}")
+            
+    # Format freed space
+    if freed_bytes >= 1024 * 1024 * 1024:
+        freed_space_str = f"{freed_bytes / (1024 * 1024 * 1024):.2f} GB"
+    elif freed_bytes >= 1024 * 1024:
+        freed_space_str = f"{freed_bytes / (1024 * 1024):.2f} MB"
+    elif freed_bytes >= 1024:
+        freed_space_str = f"{freed_bytes / 1024:.2f} KB"
+    else:
+        freed_space_str = f"{freed_bytes} Bytes"
+        
+    return {
+        "status": "success",
+        "deleted_count": deleted_count,
+        "freed_space": freed_space_str,
+        "deleted_files": deleted_files
+    }
+
 
 @app.get("/job/{job_id}")
 def get_job(job_id: str):

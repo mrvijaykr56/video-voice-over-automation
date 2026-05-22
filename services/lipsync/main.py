@@ -1,4 +1,5 @@
 import os
+import asyncio
 import subprocess
 import logging
 from fastapi import FastAPI, HTTPException, status
@@ -45,6 +46,22 @@ def get_duration(file_path: str) -> float:
         # Default fallback
         return 10.0
 
+def get_video_dimensions(file_path: str) -> tuple[int, int]:
+    """Gets width and height of video file using ffprobe."""
+    cmd = [
+        "ffprobe", "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=width,height",
+        "-of", "csv=s=x:p=0", file_path
+    ]
+    try:
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True, timeout=600)
+        parts = result.stdout.strip().split('x')
+        if len(parts) == 2:
+            return int(parts[0]), int(parts[1])
+    except Exception as e:
+        logger.error(f"Failed to probe dimensions for {file_path}: {e}")
+    return 640, 480
+
 def run_scene_alignment(video_path: str, audio_path: str, output_path: str, job_id: str = None) -> str:
     """Adjusts video speed (using setpts) to match audio duration with live progress feedback."""
     video_dur = get_duration(video_path)
@@ -56,6 +73,12 @@ def run_scene_alignment(video_path: str, audio_path: str, output_path: str, job_
     factor = audio_dur / video_dur
     logger.info(f"Scene sync: video={video_dur}s, audio={audio_dur}s. Speed factor={factor}")
     
+    width, height = get_video_dimensions(video_path)
+    is_4k = width >= 3840 or height >= 3840
+    preset = "ultrafast" if is_4k else "superfast"
+    crf = "23" if is_4k else "20"
+    logger.info(f"Video detected dimensions: {width}x{height} (4K={is_4k}). Selected preset={preset}, crf={crf}")
+    
     # FFmpeg command to time-stretch video stream to match audio stream duration
     cmd = [
         "ffmpeg", "-y",
@@ -65,8 +88,8 @@ def run_scene_alignment(video_path: str, audio_path: str, output_path: str, job_
         "-map", "[v]",
         "-map", "1:a",
         "-c:v", "libx264",
-        "-crf", "16",
-        "-preset", "medium",
+        "-crf", crf,
+        "-preset", preset,
         "-pix_fmt", "yuv420p",
         "-c:a", "aac",
         "-b:a", "320k",
@@ -176,10 +199,25 @@ async def sync_audio_video(request: SyncRequest):
     output_path = os.path.join(SYNCED_DIR, output_filename)
     
     try:
+        loop = asyncio.get_event_loop()
         if request.sync_mode.lower() == "lipsync":
-            method, details = run_wav2lip_stub(request.video_path, request.audio_path, output_path, request.job_id)
+            method, details = await loop.run_in_executor(
+                None,
+                run_wav2lip_stub,
+                request.video_path,
+                request.audio_path,
+                output_path,
+                request.job_id
+            )
         else:
-            method = run_scene_alignment(request.video_path, request.audio_path, output_path, request.job_id)
+            method = await loop.run_in_executor(
+                None,
+                run_scene_alignment,
+                request.video_path,
+                request.audio_path,
+                output_path,
+                request.job_id
+            )
             details = "Successfully synchronized video speed with audio duration."
     except Exception as e:
         raise HTTPException(

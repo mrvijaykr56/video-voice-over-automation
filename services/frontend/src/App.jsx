@@ -1,8 +1,7 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { 
   UploadCloud, 
   Play, 
-  CheckCircle, 
   FileText, 
   Sparkles, 
   Settings, 
@@ -14,7 +13,8 @@ import {
   Video,
   Clock,
   Volume2,
-  Music
+  Music,
+  Trash2
 } from 'lucide-react';
 
 const API_BASE_URL = 'http://127.0.0.1:8000';
@@ -35,6 +35,31 @@ const getStatusClass = (status) => {
   }
 };
 
+const formatJobDate = (dateStr) => {
+  if (!dateStr) return '';
+  let isoStr = dateStr;
+  if (!isoStr.endsWith('Z') && !isoStr.includes('+') && !isoStr.includes('-')) {
+    if (isoStr.includes(' ')) {
+      isoStr = isoStr.replace(' ', 'T');
+    }
+    isoStr = isoStr + 'Z';
+  }
+  try {
+    return new Date(isoStr).toLocaleString('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      hour12: true,
+      day: 'numeric',
+      month: 'numeric',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit'
+    });
+  } catch {
+    return new Date(isoStr).toLocaleString();
+  }
+};
+
 function App() {
   // Navigation tab state
   const [activeTab, setActiveTab] = useState('video_sync');
@@ -43,7 +68,6 @@ function App() {
   const [videoFile, setVideoFile] = useState(null);
   const [scriptFile, setScriptFile] = useState(null);
   const videoInputRef = useRef(null);
-  const scriptInputRef = useRef(null);
 
   // Script to MP3 state
   const [scriptText, setScriptText] = useState('');
@@ -54,7 +78,7 @@ function App() {
   const [language, setLanguage] = useState('en');
   const [voiceGender, setVoiceGender] = useState('male');
   const [syncMode, setSyncMode] = useState('scene');
-  const [watermarkText, setWatermarkText] = useState('');
+  const [watermarkText] = useState('');
   const [captionStyle, setCaptionStyle] = useState('active_word');
   const [fontName, setFontName] = useState('Arial');
   const [fontSize, setFontSize] = useState(24);
@@ -64,6 +88,11 @@ function App() {
   const [ttsEngine, setTtsEngine] = useState('edge-tts');
   const [elevenLabsKey, setElevenLabsKey] = useState('');
   const [polishScript, setPolishScript] = useState(true);
+  const [voiceSpeed, setVoiceSpeed] = useState(1.0);
+  const [azureSpeechKey, setAzureSpeechKey] = useState('');
+  const [azureSpeechRegion, setAzureSpeechRegion] = useState('');
+  const [voiceName, setVoiceName] = useState('');
+  const [voiceStyle, setVoiceStyle] = useState('default');
 
   // App flow state
   const [isUploading, setIsUploading] = useState(false);
@@ -72,15 +101,100 @@ function App() {
   const [activeJob, setActiveJob] = useState(null);
   const [jobsList, setJobsList] = useState([]);
   
+  // Pagination state
+  const [currentPage, setCurrentPage] = useState(1);
+  const [rowsPerPage, setRowsPerPage] = useState(5);
+  
   // Preview video URL
   const [previewUrl, setPreviewUrl] = useState(null);
 
+  // Storage cleanup state
+  const [isClearing, setIsClearing] = useState(false);
+  const [cleanupStatus, setCleanupStatus] = useState(null);
+
   const socketRef = useRef(null);
+
+  const fetchJobs = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/jobs`);
+      if (response.ok) {
+        const data = await response.json();
+        setJobsList(data);
+      }
+    } catch (err) {
+      console.error("Error fetching jobs:", err);
+    }
+  };
+
+  const handleClearTempFiles = async () => {
+    const confirmClear = window.confirm(
+      "Are you sure you want to clear temporary files? This will delete uploaded files, custom audio files, and synced video files that are no longer active, while keeping all final generated video outputs. This cannot be undone."
+    );
+    if (!confirmClear) return;
+
+    setIsClearing(true);
+    setError(null);
+    setCleanupStatus(null);
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/cleanup_temp_files`, {
+        method: "POST",
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        setCleanupStatus(
+          `Successfully deleted ${data.deleted_count} temporary files (${data.freed_space} freed).`
+        );
+        // Automatically hide the status message after 10 seconds
+        setTimeout(() => {
+          setCleanupStatus(null);
+        }, 10000);
+      } else {
+        const errText = await response.text();
+        setError(`Failed to clear temporary files: ${errText}`);
+      }
+    } catch (err) {
+      console.error("Error clearing temporary files:", err);
+      setError("An error occurred while clearing temporary files.");
+    } finally {
+      setIsClearing(false);
+    }
+  };
 
   // Fetch past jobs on mount
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchJobs();
   }, []);
+
+  // Update default voice name based on language and gender selection
+  useEffect(() => {
+    if (['azure-tts', 'edge-tts', 'edge-dynamic'].includes(ttsEngine)) {
+      if (language === 'hi') {
+        if (voiceGender === 'female') {
+          if (!['hi-IN-SwaraNeural', 'hi-IN-SapnaNeural', 'hi-IN-AditiNeural', 'hi-IN-NehaNeural'].includes(voiceName)) {
+            setVoiceName('hi-IN-SwaraNeural');
+          }
+        } else {
+          setVoiceName('hi-IN-MadhurNeural');
+        }
+      } else if (language === 'en') {
+        setVoiceName(voiceGender === 'female' ? 'en-US-AriaNeural' : 'en-US-GuyNeural');
+      } else if (language === 'en-in') {
+        setVoiceName(voiceGender === 'female' ? 'en-IN-NeerjaExpressiveNeural' : 'en-IN-PrabhatNeural');
+      }
+    } else {
+      setVoiceName('');
+    }
+  }, [ttsEngine, language, voiceGender]);
+
+  // Reset style if Swara voice is not selected
+  useEffect(() => {
+    if (voiceName !== 'hi-IN-SwaraNeural') {
+      setVoiceStyle('default');
+    }
+  }, [voiceName]);
 
   // Track active job via websocket
   useEffect(() => {
@@ -125,18 +239,6 @@ function App() {
     };
   }, [activeJobId]);
 
-  const fetchJobs = async () => {
-    try {
-      const response = await fetch(`${API_BASE_URL}/jobs`);
-      if (response.ok) {
-        const data = await response.json();
-        setJobsList(data);
-      }
-    } catch (err) {
-      console.error("Error fetching jobs:", err);
-    }
-  };
-
   const handleVideoDragOver = (e) => {
     e.preventDefault();
   };
@@ -150,28 +252,6 @@ function App() {
         setError(null);
       } else {
         setError("Invalid file type. Please upload an MP4 or other video file.");
-      }
-    }
-  };
-
-  const handleScriptDragOver = (e) => {
-    e.preventDefault();
-  };
-
-  const handleScriptDrop = (e) => {
-    e.preventDefault();
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      const file = e.dataTransfer.files[0];
-      if (file.name.endsWith('.txt')) {
-        setScriptFile(file);
-        setError(null);
-        const reader = new FileReader();
-        reader.onload = (evt) => {
-          setScriptText(evt.target.result);
-        };
-        reader.readAsText(file);
-      } else {
-        setError("Invalid file type. Please upload a TXT file.");
       }
     }
   };
@@ -208,6 +288,11 @@ function App() {
       formData.append('tts_engine', ttsEngine);
       formData.append('elevenlabs_key', elevenLabsKey);
       formData.append('polish_script', polishScript ? 'true' : 'false');
+      formData.append('voice_speed', voiceSpeed);
+      formData.append('azure_speech_key', azureSpeechKey);
+      formData.append('azure_speech_region', azureSpeechRegion);
+      formData.append('voice_name', voiceName);
+      formData.append('voice_style', voiceStyle);
 
       try {
         const response = await fetch(`${API_BASE_URL}/upload`, {
@@ -228,6 +313,8 @@ function App() {
           progress: 0.0,
           job_type: 'video_sync'
         });
+        setCurrentPage(1);
+        fetchJobs();
         
         // Clear inputs
         setVideoFile(null);
@@ -256,6 +343,11 @@ function App() {
       formData.append('voice_gender', voiceGender);
       formData.append('tts_engine', ttsEngine);
       formData.append('elevenlabs_key', elevenLabsKey);
+      formData.append('voice_speed', voiceSpeed);
+      formData.append('azure_speech_key', azureSpeechKey);
+      formData.append('azure_speech_region', azureSpeechRegion);
+      formData.append('voice_name', voiceName);
+      formData.append('voice_style', voiceStyle);
 
       try {
         const response = await fetch(`${API_BASE_URL}/upload_audio`, {
@@ -276,6 +368,8 @@ function App() {
           progress: 0.0,
           job_type: 'audio_only'
         });
+        setCurrentPage(1);
+        fetchJobs();
         
         // Clear inputs
         setScriptText('');
@@ -430,6 +524,44 @@ function App() {
         </div>
       </div>
     );
+  };
+
+  // Pagination calculations
+  const totalPages = Math.ceil(jobsList.length / rowsPerPage);
+  const activePage = Math.max(1, Math.min(currentPage, totalPages));
+  const indexOfLastRow = activePage * rowsPerPage;
+  const indexOfFirstRow = indexOfLastRow - rowsPerPage;
+  const currentJobsList = jobsList.slice(indexOfFirstRow, indexOfLastRow);
+
+  const handleRowsPerPageChange = (e) => {
+    setRowsPerPage(Number(e.target.value));
+    setCurrentPage(1);
+  };
+
+  const getPageNumbers = () => {
+    const pages = [];
+    const maxVisible = 5;
+    if (totalPages <= maxVisible) {
+      for (let i = 1; i <= totalPages; i++) pages.push(i);
+    } else {
+      pages.push(1);
+      if (activePage > 3) {
+        pages.push('ellipsis-start');
+      }
+      
+      const start = Math.max(2, activePage - 1);
+      const end = Math.min(totalPages - 1, activePage + 1);
+      
+      for (let i = start; i <= end; i++) {
+        pages.push(i);
+      }
+      
+      if (activePage < totalPages - 2) {
+        pages.push('ellipsis-end');
+      }
+      pages.push(totalPages);
+    }
+    return pages;
   };
 
   return (
@@ -660,6 +792,7 @@ function App() {
                     <option value="edge-tts">Standard (Edge-TTS)</option>
                     <option value="edge-dynamic">Dynamic Free (Edge-TTS Pro)</option>
                     <option value="elevenlabs">Premium Dynamic (ElevenLabs)</option>
+                    <option value="azure-tts">Azure Cognitive Services (Azure TTS)</option>
                   </select>
                 </div>
 
@@ -678,6 +811,23 @@ function App() {
                   </label>
                 </div>
 
+                <div className="form-group">
+                  <label className="form-label">Narration Speed ({voiceSpeed}x)</label>
+                  <select 
+                    className="custom-select" 
+                    value={voiceSpeed}
+                    onChange={(e) => setVoiceSpeed(Number(e.target.value))}
+                  >
+                    <option value={0.8}>0.8x (Slower)</option>
+                    <option value={0.9}>0.9x</option>
+                    <option value={1.0}>1.0x (Default)</option>
+                    <option value={1.1}>1.1x</option>
+                    <option value={1.2}>1.2x (Fast)</option>
+                    <option value={1.3}>1.3x</option>
+                    <option value={1.5}>1.5x (Faster)</option>
+                  </select>
+                </div>
+
                 {ttsEngine === 'elevenlabs' && (
                   <div className="form-group" style={{ gridColumn: '1 / -1' }}>
                     <label className="form-label">ElevenLabs API Key</label>
@@ -689,6 +839,89 @@ function App() {
                       placeholder="sk_..."
                     />
                   </div>
+                )}
+
+                {ttsEngine === 'azure-tts' && (
+                  <div className="form-group" style={{ gridColumn: '1 / -1', margin: '0 0 1rem 0' }}>
+                    <div className="glass-panel" style={{ padding: '1.5rem', border: '1px solid rgba(168, 85, 247, 0.25)', background: 'rgba(168, 85, 247, 0.02)', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', width: '100%', boxSizing: 'border-box' }}>
+                      <div className="form-group" style={{ margin: 0, gridColumn: '1 / -1' }}>
+                        <span style={{ fontSize: '0.8rem', color: '#c084fc', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Azure Credentials</span>
+                      </div>
+                      <div className="form-group" style={{ margin: 0 }}>
+                        <label className="form-label">Azure Speech API Key</label>
+                        <input 
+                          type="password" 
+                          className="custom-input"
+                          value={azureSpeechKey}
+                          onChange={(e) => setAzureSpeechKey(e.target.value)}
+                          placeholder="API Key"
+                        />
+                      </div>
+                      <div className="form-group" style={{ margin: 0 }}>
+                        <label className="form-label">Azure Speech Region</label>
+                        <input 
+                          type="text" 
+                          className="custom-input"
+                          value={azureSpeechRegion}
+                          onChange={(e) => setAzureSpeechRegion(e.target.value)}
+                          placeholder="e.g., eastus, centralindia"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {['azure-tts', 'edge-tts', 'edge-dynamic'].includes(ttsEngine) && (
+                  <>
+                    {language === 'hi' && voiceGender === 'female' ? (
+                      <div className="form-group">
+                        <label className="form-label">Voice Name</label>
+                        <select 
+                          className="custom-select" 
+                          value={voiceName}
+                          onChange={(e) => setVoiceName(e.target.value)}
+                        >
+                          <option value="hi-IN-SwaraNeural">hi-IN-SwaraNeural (Styles Support)</option>
+                          <option value="hi-IN-SapnaNeural" disabled={ttsEngine !== 'azure-tts'}>hi-IN-SapnaNeural {ttsEngine !== 'azure-tts' ? '(Azure Only)' : '(Default Style)'}</option>
+                          <option value="hi-IN-AditiNeural" disabled={ttsEngine !== 'azure-tts'}>hi-IN-AditiNeural {ttsEngine !== 'azure-tts' ? '(Azure Only)' : '(Default Style)'}</option>
+                          <option value="hi-IN-NehaNeural" disabled={ttsEngine !== 'azure-tts'}>hi-IN-NehaNeural {ttsEngine !== 'azure-tts' ? '(Azure Only)' : '(Default Style)'}</option>
+                        </select>
+                      </div>
+                    ) : (
+                      <div className="form-group">
+                        <label className="form-label">Voice Name</label>
+                        <input 
+                          type="text"
+                          className="custom-input"
+                          value={voiceName || (language === 'hi' ? (voiceGender === 'female' ? 'hi-IN-SwaraNeural' : 'hi-IN-MadhurNeural') : language === 'en' ? (voiceGender === 'female' ? 'en-US-AriaNeural' : 'en-US-GuyNeural') : (voiceGender === 'female' ? 'en-IN-NeerjaExpressiveNeural' : 'en-IN-PrabhatNeural'))}
+                          disabled
+                          title="Auto-mapped based on language and gender settings"
+                          style={{ opacity: 0.6, cursor: 'not-allowed' }}
+                        />
+                      </div>
+                    )}
+
+                    {voiceName === 'hi-IN-SwaraNeural' && (
+                      <div className="form-group">
+                        <label className="form-label">Speaking Style</label>
+                        <select 
+                          className="custom-select" 
+                          value={voiceStyle}
+                          onChange={(e) => setVoiceStyle(e.target.value)}
+                        >
+                          <option value="default">Default</option>
+                          <option value="cheerful" disabled={ttsEngine !== 'azure-tts'}>Cheerful {ttsEngine !== 'azure-tts' ? '(Azure Only)' : ''}</option>
+                          <option value="empathetic" disabled={ttsEngine !== 'azure-tts'}>Empathetic {ttsEngine !== 'azure-tts' ? '(Azure Only)' : ''}</option>
+                          <option value="newscast" disabled={ttsEngine !== 'azure-tts'}>Newscast {ttsEngine !== 'azure-tts' ? '(Azure Only)' : ''}</option>
+                        </select>
+                        {ttsEngine !== 'azure-tts' && (
+                          <span style={{ fontSize: '0.75rem', color: '#a8a29e', marginTop: '0.25rem', display: 'block' }}>
+                            💡 Switch to Azure TTS to choose premium speaking styles.
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </>
                 )}
 
                 {activeTab === 'video_sync' && (
@@ -934,14 +1167,64 @@ function App() {
             <h2 className="card-title text-gradient">Sync Job History</h2>
             <p className="card-description">Review previous uploads, durations, and output files.</p>
           </div>
-          <button 
-            className="action-btn" 
-            style={{ width: 'auto', padding: '0.5rem 1rem', background: 'none', border: '1px solid var(--border-glass)', fontSize: '0.8rem' }}
-            onClick={fetchJobs}
-          >
-            <RefreshCw size={14} /> Refresh List
-          </button>
+          <div style={{ display: 'flex', gap: '0.5rem' }}>
+            <button 
+              className="action-btn" 
+              style={{ 
+                width: 'auto', 
+                padding: '0.5rem 1rem', 
+                background: 'rgba(239, 68, 68, 0.08)', 
+                border: '1px solid rgba(239, 68, 68, 0.2)', 
+                fontSize: '0.8rem',
+                color: '#fca5a5'
+              }}
+              onClick={handleClearTempFiles}
+              disabled={isClearing}
+            >
+              <Trash2 size={14} /> {isClearing ? 'Clearing...' : 'Clear Temp Files'}
+            </button>
+            <button 
+              className="action-btn" 
+              style={{ width: 'auto', padding: '0.5rem 1rem', background: 'none', border: '1px solid var(--border-glass)', fontSize: '0.8rem' }}
+              onClick={fetchJobs}
+            >
+              <RefreshCw size={14} /> Refresh List
+            </button>
+          </div>
         </div>
+
+        {cleanupStatus && (
+          <div style={{ 
+            margin: '0 1.5rem 1.25rem 1.5rem', 
+            background: 'rgba(16, 185, 129, 0.08)', 
+            border: '1px solid rgba(16, 185, 129, 0.2)', 
+            color: '#a7f3d0', 
+            padding: '0.75rem 1rem', 
+            borderRadius: '8px', 
+            display: 'flex', 
+            alignItems: 'center', 
+            gap: '0.5rem', 
+            fontSize: '0.85rem' 
+          }}>
+            <Sparkles size={16} style={{ color: '#34d399' }} />
+            <span>{cleanupStatus}</span>
+            <button 
+              style={{ 
+                marginLeft: 'auto', 
+                background: 'none', 
+                border: 'none', 
+                color: 'inherit', 
+                cursor: 'pointer', 
+                fontSize: '1.2rem',
+                padding: '0 0.25rem',
+                lineHeight: 1
+              }} 
+              onClick={() => setCleanupStatus(null)}
+            >
+              &times;
+            </button>
+          </div>
+        )}
         
         <div style={{ overflowX: 'auto', padding: '0 1.5rem 1.5rem 1.5rem' }}>
           <table className="job-table">
@@ -957,8 +1240,8 @@ function App() {
               </tr>
             </thead>
             <tbody>
-              {jobsList.length > 0 ? (
-                jobsList.map((job) => (
+              {currentJobsList.length > 0 ? (
+                currentJobsList.map((job) => (
                   <tr key={job.id}>
                     <td style={{ fontFamily: 'monospace', color: 'var(--text-secondary)' }}>
                       {job.id.substring(0, 8)}...
@@ -976,11 +1259,11 @@ function App() {
                       </span>
                     </td>
                     <td>
-                      {new Date(job.created_at).toLocaleString()}
+                      {formatJobDate(job.created_at)}
                     </td>
                     <td>
                       <span style={{ textTransform: 'uppercase', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-                        {job.language} | {job.voice_gender}
+                        {job.language} | {job.voice_gender} | {job.voice_speed || 1.0}x
                       </span>
                     </td>
                     <td>
@@ -1023,7 +1306,7 @@ function App() {
                 ))
               ) : (
                 <tr>
-                  <td colSpan="6" style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '2rem' }}>
+                  <td colSpan="7" style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '2rem' }}>
                     No sync jobs recorded. Upload your first assets above to start!
                   </td>
                 </tr>
@@ -1031,6 +1314,86 @@ function App() {
             </tbody>
           </table>
         </div>
+        {jobsList.length > 0 && (
+          <div className="pagination-container">
+            <div className="pagination-left">
+              <div className="pagination-size-selector">
+                <span>Rows per page:</span>
+                <select 
+                  className="pagination-select" 
+                  value={rowsPerPage} 
+                  onChange={handleRowsPerPageChange}
+                >
+                  <option value={5}>5</option>
+                  <option value={10}>10</option>
+                  <option value={20}>20</option>
+                  <option value={50}>50</option>
+                </select>
+              </div>
+              <div className="pagination-info">
+                Showing {indexOfFirstRow + 1} - {Math.min(indexOfLastRow, jobsList.length)} of {jobsList.length} jobs
+              </div>
+            </div>
+            
+            <div className="pagination-buttons">
+              <button 
+                className="pagination-btn" 
+                onClick={() => setCurrentPage(1)} 
+                disabled={activePage === 1}
+                title="First Page"
+              >
+                &laquo;
+              </button>
+              <button 
+                className="pagination-btn" 
+                onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))} 
+                disabled={activePage === 1}
+                title="Previous Page"
+              >
+                &lsaquo;
+              </button>
+              
+              {getPageNumbers().map((page, idx) => {
+                if (page === 'ellipsis-start' || page === 'ellipsis-end') {
+                  return (
+                    <span 
+                      key={`ellipsis-${idx}`} 
+                      style={{ color: 'var(--text-muted)', padding: '0 0.25rem', userSelect: 'none' }}
+                    >
+                      ...
+                    </span>
+                  );
+                }
+                return (
+                  <button
+                    key={page}
+                    onClick={() => setCurrentPage(page)}
+                    className={`pagination-btn ${activePage === page ? 'active' : ''}`}
+                  >
+                    {page}
+                  </button>
+                );
+              })}
+              
+              <button 
+                className="pagination-btn" 
+                onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))} 
+                disabled={activePage === totalPages}
+                title="Next Page"
+              >
+                &rsaquo;
+              </button>
+              <button 
+                className="pagination-btn" 
+                onClick={() => setCurrentPage(totalPages)} 
+                disabled={activePage === totalPages}
+                title="Last Page"
+              >
+                &raquo;
+              </button>
+            </div>
+          </div>
+        )}
       </section>
     </div>
   );

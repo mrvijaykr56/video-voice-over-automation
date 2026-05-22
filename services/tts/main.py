@@ -46,6 +46,11 @@ class TTSRequest(BaseModel):
     job_id: str
     tts_engine: str = "edge-tts"
     elevenlabs_key: str = ""
+    voice_speed: float = 1.0
+    azure_speech_key: str = ""
+    azure_speech_region: str = ""
+    voice_name: str = ""
+    voice_style: str = ""
 
 class TTSResponse(BaseModel):
     status: str
@@ -66,6 +71,51 @@ def get_audio_duration(file_path: str) -> float:
         logger.error(f"Failed to probe duration for {file_path}: {e}")
         return 5.0
 
+def adjust_audio_speed_and_alignment(audio_path: str, alignment_path: str, speed: float):
+    if speed == 1.0:
+        return
+        
+    logger.info(f"Adjusting audio speed to {speed}x using FFmpeg...")
+    temp_audio_path = audio_path + ".temp.mp3"
+    
+    cmd = [
+        "ffmpeg", "-y", "-i", audio_path,
+        "-filter:a", f"atempo={speed}",
+        temp_audio_path
+    ]
+    try:
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        if os.path.exists(temp_audio_path):
+            if os.path.exists(audio_path):
+                os.remove(audio_path)
+            os.rename(temp_audio_path, audio_path)
+            logger.info("FFmpeg speed adjustment succeeded.")
+    except Exception as e:
+        logger.error(f"FFmpeg speed adjustment failed: {e}")
+        if os.path.exists(temp_audio_path):
+            try:
+                os.remove(temp_audio_path)
+            except Exception:
+                pass
+                
+    if os.path.exists(alignment_path):
+        try:
+            logger.info(f"Scaling alignment timestamps by 1/{speed}...")
+            with open(alignment_path, "r", encoding="utf-8") as f:
+                alignments = json.load(f)
+            
+            for item in alignments:
+                if "start" in item:
+                    item["start"] = round(item["start"] / speed, 3)
+                if "end" in item:
+                    item["end"] = round(item["end"] / speed, 3)
+                    
+            with open(alignment_path, "w", encoding="utf-8") as f:
+                json.dump(alignments, f, indent=2)
+            logger.info("Alignment timestamp scaling succeeded.")
+        except Exception as e:
+            logger.error(f"Failed to scale alignment timestamps: {e}")
+
 async def generate_gtts_fallback(request: TTSRequest, output_path: str, alignment_path: str, lang: str):
     logger.info("Falling back to gTTS...")
     loop = asyncio.get_event_loop()
@@ -79,7 +129,7 @@ async def generate_gtts_fallback(request: TTSRequest, output_path: str, alignmen
     logger.info("gTTS fallback generation succeeded.")
     
     words = request.text.split()
-    duration = get_audio_duration(output_path)
+    duration = await loop.run_in_executor(None, get_audio_duration, output_path)
     word_duration = duration / max(len(words), 1)
     alignment_data = []
     for i, word in enumerate(words):
@@ -92,11 +142,15 @@ async def generate_gtts_fallback(request: TTSRequest, output_path: str, alignmen
     with open(alignment_path, "w", encoding="utf-8") as f:
         json.dump(alignment_data, f, indent=2)
         
+    await loop.run_in_executor(None, adjust_audio_speed_and_alignment, output_path, alignment_path, request.voice_speed)
+        
     return "gTTS", f"gTTS-{gtts_lang}"
 
 async def generate_edge_tts(request: TTSRequest, voice: str, output_path: str, alignment_path: str):
-    logger.info(f"Using edge-tts generation for {voice}...")
-    communicate = edge_tts.Communicate(request.text, voice, boundary="WordBoundary")
+    logger.info(f"Using edge-tts generation for {voice} at speed {request.voice_speed}x...")
+    percentage = int(round((request.voice_speed - 1.0) * 100))
+    rate_str = f"+{percentage}%" if percentage >= 0 else f"{percentage}%"
+    communicate = edge_tts.Communicate(request.text, voice, rate=rate_str, boundary="WordBoundary")
     submaker = edge_tts.SubMaker()
     
     async def stream_and_save():
@@ -141,18 +195,22 @@ async def generate_edge_dynamic(request: TTSRequest, voice: str, output_path: st
             continue
         punct = chunks[i+1] if i+1 < len(chunks) else "."
         
-        rate = "+0%"
+        base_percentage = int(round((request.voice_speed - 1.0) * 100))
+        punct_percentage = 0
         pitch = "+0Hz"
         
         if punct == "!":
-            rate = "+10%"
+            punct_percentage = 10
             pitch = "+15Hz"
         elif punct == "?":
             pitch = "+10Hz"
             
+        total_percentage = base_percentage + punct_percentage
+        rate_str = f"+{total_percentage}%" if total_percentage >= 0 else f"{total_percentage}%"
+        
         full_chunk = text_chunk + punct
         
-        communicate = edge_tts.Communicate(full_chunk, voice, rate=rate, pitch=pitch, boundary="WordBoundary")
+        communicate = edge_tts.Communicate(full_chunk, voice, rate=rate_str, pitch=pitch, boundary="WordBoundary")
         submaker = edge_tts.SubMaker()
         
         chunk_audio = b""
@@ -260,7 +318,109 @@ async def generate_elevenlabs(request: TTSRequest, voice_id: str, output_path: s
     with open(alignment_path, "w", encoding="utf-8") as f:
         json.dump(alignment_data, f, indent=2)
         
+    await loop.run_in_executor(None, adjust_audio_speed_and_alignment, output_path, alignment_path, request.voice_speed)
+        
     return "elevenlabs", voice_id
+
+def run_azure_synthesis(ssml: str, speech_key: str, speech_region: str, output_path: str):
+    import azure.cognitiveservices.speech as speechsdk
+    
+    speech_config = speechsdk.SpeechConfig(subscription=speech_key, region=speech_region)
+    speech_config.set_speech_synthesis_output_format(speechsdk.SpeechSynthesisOutputFormat.Audio24Khz160KBitRateMonoMp3)
+    
+    audio_config = speechsdk.audio.AudioConfig(filename=output_path)
+    synthesizer = speechsdk.SpeechSynthesizer(speech_config=speech_config, audio_config=audio_config)
+    
+    alignments = []
+    
+    def word_boundary_handler(evt):
+        is_word = True
+        if hasattr(evt, "boundary_type") and hasattr(speechsdk, "SpeechSynthesisBoundaryType"):
+            is_word = (evt.boundary_type == speechsdk.SpeechSynthesisBoundaryType.Word)
+            
+        if is_word and evt.text and not (evt.text.startswith("<") and evt.text.endswith(">")):
+            start_sec = round(evt.audio_offset / 10000000.0, 3)
+            duration_sec = round(evt.duration / 10000000.0, 3)
+            end_sec = round(start_sec + duration_sec, 3)
+            alignments.append({
+                "word": evt.text,
+                "start": start_sec,
+                "end": end_sec
+            })
+            
+    synthesizer.synthesis_word_boundary.connect(word_boundary_handler)
+    
+    result = synthesizer.speak_ssml_async(ssml).get()
+    
+    if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
+        return alignments
+    elif result.reason == speechsdk.ResultReason.Canceled:
+        cancellation_details = result.cancellation_details
+        error_msg = f"Azure Speech synthesis canceled. Reason: {cancellation_details.reason}."
+        if cancellation_details.error_details:
+            error_msg += f" Error details: {cancellation_details.error_details}"
+        raise Exception(error_msg)
+    else:
+        raise Exception(f"Azure Speech synthesis failed with reason: {result.reason}")
+
+async def generate_azure_tts(request: TTSRequest, voice: str, output_path: str, alignment_path: str):
+    logger.info(f"Using Azure TTS for voice {voice}...")
+    
+    # Check credentials
+    speech_key = request.azure_speech_key or os.getenv("AZURE_SPEECH_KEY")
+    speech_region = request.azure_speech_region or os.getenv("AZURE_SPEECH_REGION")
+    
+    if not speech_key or not speech_region:
+        raise Exception("Azure Speech Key or Region is missing. Please configure them in the UI or environment.")
+        
+    # XML Escape the text
+    import xml.sax.saxutils as saxutils
+    escaped_text = saxutils.escape(request.text)
+    
+    # Build SSML elements
+    # Style
+    inner_content = escaped_text
+    style = request.voice_style.strip() if request.voice_style else ""
+    if style and style.lower() != "default":
+        inner_content = f"<mstts:express-as style='{style}'>{inner_content}</mstts:express-as>"
+        
+    # Speed (Prosody)
+    speed = request.voice_speed
+    rate_percentage = int(round((speed - 1.0) * 100))
+    if rate_percentage != 0:
+        rate_str = f"{rate_percentage:+}%"
+        inner_content = f"<prosody rate='{rate_str}'>{inner_content}</prosody>"
+        
+    ssml = f"""<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xmlns:mstts='http://www.w3.org/2001/mstts' xml:lang='hi-IN'>
+        <voice name='{voice}'>
+            {inner_content}
+        </voice>
+    </speak>"""
+    
+    logger.info(f"Generated SSML for Azure TTS:\n{ssml}")
+    
+    loop = asyncio.get_event_loop()
+    
+    # Execute the synchronous synthesis in the executor
+    alignments = await loop.run_in_executor(
+        None,
+        run_azure_synthesis,
+        ssml,
+        speech_key,
+        speech_region,
+        output_path
+    )
+    
+    if request.job_id in cancelled_jobs:
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        raise Exception("Job cancelled by user")
+        
+    # Write alignments JSON
+    with open(alignment_path, "w", encoding="utf-8") as f:
+        json.dump(alignments, f, indent=2)
+        
+    return "azure-tts", voice
 
 
 @app.post("/generate_audio", response_model=TTSResponse)
@@ -274,19 +434,30 @@ async def generate_audio(request: TTSRequest):
     alignment_path = os.path.join(AUDIO_DIR, alignment_filename)
     
     try:
-        if request.tts_engine == "elevenlabs":
+        if request.tts_engine == "azure-tts":
+            voice = request.voice_name.strip() if request.voice_name else ""
+            if not voice:
+                voice_key = (lang, gender)
+                voice = VOICE_MAPPING.get(voice_key, VOICE_MAPPING[("en", "male")])
+            method, voice = await generate_azure_tts(request, voice, output_path, alignment_path)
+
+        elif request.tts_engine == "elevenlabs":
             voice_key = (lang, gender)
             voice_id = ELEVENLABS_VOICE_MAPPING.get(voice_key, ELEVENLABS_VOICE_MAPPING[("en", "male")])
             method, voice = await generate_elevenlabs(request, voice_id, output_path, alignment_path)
             
         elif request.tts_engine == "edge-dynamic":
-            voice_key = (lang, gender)
-            voice = VOICE_MAPPING.get(voice_key, VOICE_MAPPING[("en", "male")])
+            voice = request.voice_name.strip() if request.voice_name else ""
+            if not voice:
+                voice_key = (lang, gender)
+                voice = VOICE_MAPPING.get(voice_key, VOICE_MAPPING[("en", "male")])
             method, voice = await generate_edge_dynamic(request, voice, output_path, alignment_path)
             
         else:
-            voice_key = (lang, gender)
-            voice = VOICE_MAPPING.get(voice_key, VOICE_MAPPING[("en", "male")])
+            voice = request.voice_name.strip() if request.voice_name else ""
+            if not voice:
+                voice_key = (lang, gender)
+                voice = VOICE_MAPPING.get(voice_key, VOICE_MAPPING[("en", "male")])
             method, voice = await generate_edge_tts(request, voice, output_path, alignment_path)
             
     except Exception as e:

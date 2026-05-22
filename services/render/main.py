@@ -1,4 +1,5 @@
 import os
+import asyncio
 import subprocess
 import logging
 import json
@@ -218,14 +219,7 @@ def escape_filter_path(path: str) -> str:
     escaped = escaped.replace("'", "'\\\\''")
     return escaped
 
-@app.post("/render_video", response_model=RenderResponse)
-async def render_video(request: RenderRequest):
-    if not os.path.exists(request.synced_video_path):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Synced video file not found.")
-        
-    output_filename = f"{request.job_id}_final.mp4"
-    output_path = os.path.join(OUTPUT_DIR, output_filename)
-    
+def run_rendering(request: RenderRequest, output_path: str) -> str:
     # Retrieve original dimensions
     width, height = get_video_dimensions(request.synced_video_path)
     logger.info(f"Video detected dimensions: {width}x{height} (4K={width>=3840 or height>=3840})")
@@ -286,12 +280,16 @@ async def render_video(request: RenderRequest):
         
     cmd.extend(["-map", map_v, "-map", map_a])
     
+    is_4k = width >= 3840 or height >= 3840
+    preset = "ultrafast" if is_4k else "superfast"
+    crf = "23" if is_4k else "20"
+    
     cmd.extend([
         "-c:v", "libx264",
-        "-crf", "16",
+        "-crf", crf,
         "-pix_fmt", "yuv420p",
         "-profile:v", "high",
-        "-preset", "medium",
+        "-preset", preset,
         "-c:a", "aac",
         "-b:a", "320k",
         "-movflags", "+faststart",
@@ -346,32 +344,42 @@ async def render_video(request: RenderRequest):
         if p.returncode != 0:
             if request.job_id and request.job_id in cancelled_jobs:
                 raise Exception("Job cancelled by user")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="FFmpeg rendering failed during render."
-            )
+            raise Exception("FFmpeg rendering failed during render.")
             
     except subprocess.TimeoutExpired:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="FFmpeg rendering timed out after 600 seconds."
-        )
+        raise Exception("FFmpeg rendering timed out after 600 seconds.")
     except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Rendering failed: {str(e)}"
-        )
+        raise Exception(f"Rendering failed: {str(e)}")
     finally:
         if request.job_id:
             active_processes.pop(request.job_id, None)
             cancelled_jobs.discard(request.job_id)
         
+    return "Rendered H.264/AAC MP4 with word-highlighted ASS subtitles."
+
+@app.post("/render_video", response_model=RenderResponse)
+async def render_video(request: RenderRequest):
+    if not os.path.exists(request.synced_video_path):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Synced video file not found.")
+        
+    output_filename = f"{request.job_id}_final.mp4"
+    output_path = os.path.join(OUTPUT_DIR, output_filename)
+    
+    try:
+        loop = asyncio.get_event_loop()
+        details = await loop.run_in_executor(None, run_rendering, request, output_path)
+    except Exception as e:
+        if "cancelled" in str(e).lower():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Job cancelled by user")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+        
     return RenderResponse(
         status="success",
         output_video_path=os.path.abspath(output_path),
-        details="Rendered H.264/AAC MP4 with word-highlighted ASS subtitles."
+        details=details
     )
 
 @app.post("/cancel/{job_id}")
